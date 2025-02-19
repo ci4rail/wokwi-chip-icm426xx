@@ -1,0 +1,8 @@
+[wokwi]
+version = 1
+elf = 'test/main/build/arduino.avr.uno/main.ino.elf'
+firmware = 'test/main/build/arduino.avr.uno/main.ino.hex'
+
+[[chip]]
+name = 'icm426xx'
+binary = 'dist/chip.wasm'
