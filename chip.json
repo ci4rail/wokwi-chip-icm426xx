@@ -12,19 +12,19 @@
   ],
   "controls": [
     {
-      "id": "accel-amplitude",
+      "id": "accelamplitude",
       "label": "Accelerator Amplitude",
       "type": "range",
-      "min": -16,
-      "max": 16,
+      "min": 0,
+      "max": 1.0,
       "step": 0.01
     },
     {
-      "id": "gyro-amplitude",
+      "id": "gyroamplitude",
       "label": "Gyroscope Amplitude",
       "type": "range",
-      "min": -2000,
-      "max": 2000,
+      "min": 0,
+      "max": 1.0,
       "step": 0.01
     }
   ]

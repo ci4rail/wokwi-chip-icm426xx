@@ -3,11 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// only packet3 supported
-// ODR must be same for accel and gyro (gyro ODR ignored)
-// FIFO watermark in records only
-// FIFO count & data in little endian only
-// timestamp res 1us
 
 // Registers to simulate
 #define ICM426XX_INT_STATUS 0x2D  // 8 bits
@@ -18,6 +13,7 @@
 #define ICM426XX_ACCEL_CONFIG3 0x61 // 8 bits - FIFO watermark MSB
 #define ICM426XX_PWR_MGMT0 0x4E // 8 bits - enable/disable
 #define ICM426XX_REG_BANK_SEL 0x76 // 8 bits - select bank
+
 typedef struct
 {
   pin_t cs_pin;
@@ -40,13 +36,13 @@ typedef struct
 
 typedef struct __attribute__((__packed__)){
   uint8_t header;
-  uint16_t accel_x;
-  uint16_t accel_y;
-  uint16_t accel_z;
-  uint16_t gyro_x;
-  uint16_t gyro_y;
-  uint16_t gyro_z;
-  uint8_t temp;
+  int16_t accel_x;
+  int16_t accel_y;
+  int16_t accel_z;
+  int16_t gyro_x;
+  int16_t gyro_y;
+  int16_t gyro_z;
+  int8_t temp;
   uint16_t timestamp;
 } packet3_t;
 
@@ -54,19 +50,10 @@ static void chip_pin_change(void *user_data, pin_t pin, uint32_t value);
 static void chip_spi_done(void *user_data, uint8_t *buffer, uint32_t count);
 static uint32_t odr_to_millihz(uint8_t odr);
 
-static void dump_buffer(uint8_t *buffer, size_t size)
-{
-  for (size_t i = 0; i < size; i++)
-  {
-    printf("%02X ", buffer[i]);
-  }
-  printf("\n");
-}
-
 static void update_fifo_count(chip_state_t *chip, int16_t count)
 {
   chip->fifo_count += count;
-  printf("FIFO count %d\n", chip->fifo_count);
+  //printf("FIFO count %d\n", chip->fifo_count);
 
   uint16_t records = chip->fifo_count/sizeof(packet3_t);
   chip->regs[ICM426XX_FIFO_COUNTH] = records & 0xff;
@@ -98,8 +85,8 @@ static void put_fifo_data(chip_state_t *chip, uint8_t *buffer, size_t size)
 static uint8_t read_fifo_reg(chip_state_t *chip)
 {
   if(chip->fifo_count == 0){
-    printf("FIFO empty host_idx=%d!\n", chip->spi_data_from_host_idx);
-    return 0;
+    printf("FIFO empty!\n");
+    return 0x80; // FIFO empty
   }
   uint8_t data = chip->fifo[chip->fifo_read_idx];
   chip->fifo_read_idx = (chip->fifo_read_idx + 1) % sizeof(chip->fifo);
@@ -107,6 +94,15 @@ static uint8_t read_fifo_reg(chip_state_t *chip)
   return data;
 }
 
+// amplitude: 0.0 to 1.0
+static int16_t gen_random_int16(double amplitude)
+{
+  int16_t r = (uint32_t)(random() * amplitude) >> 16;
+  if(random() & 1){
+    r = -r;
+  }
+  return r;
+}
 
 static void on_sample_timer(void *user_data)
 {
@@ -115,27 +111,31 @@ static void on_sample_timer(void *user_data)
     // chip not turned on
     return;
   }
+  float accel_amplitude = attr_read_float(chip->accel_amplitude_attr);
+  float gyro_amplitude = attr_read_float(chip->gyro_amplitude_attr);
 
   packet3_t packet = {
-      .header = 0x03,
-      .accel_x = 0x1234,
-      .accel_y = 0x5678,
-      .accel_z = 0x9abc,
-      .gyro_x = 0xdef0,
-      .gyro_y = 0x1234,
-      .gyro_z = 0x5678,
-      .temp = 0x12,
+      .header = 0x68, // HEADER_MSG=0 HEADER_ACCEL=1 HEADER_GYRO=1 HEADER_20=0 ...
+      .accel_x = gen_random_int16(accel_amplitude),
+      .accel_y = gen_random_int16(accel_amplitude),
+      .accel_z = gen_random_int16(accel_amplitude),
+      .gyro_x = gen_random_int16(gyro_amplitude),
+      .gyro_y = gen_random_int16(gyro_amplitude),
+      .gyro_z = gen_random_int16(gyro_amplitude),
+      .temp = 44,
       .timestamp = (get_sim_nanos() / 1000) & 0xffff,
   };
-  printf("Sample timer pkt size %ld\n", sizeof(packet));
+  //printf("Sample timer pkt size %ld\n", sizeof(packet));
   put_fifo_data(chip, (uint8_t *)&packet, sizeof(packet));
 }
 
 void chip_init(void)
 {
   chip_state_t *chip = malloc(sizeof(chip_state_t));
-
   memset(chip->regs, 0, sizeof(chip->regs));
+
+  chip->accel_amplitude_attr = attr_init_float("accelamplitude", 1.0);
+  chip->gyro_amplitude_attr = attr_init_float("gyroamplitude", 1.0);
 
   chip->cs_pin = pin_init("CS", INPUT_PULLUP);
 
@@ -178,7 +178,7 @@ static uint8_t read_reg(chip_state_t *chip, uint8_t reg)
       break;
     }
   } else {
-    printf("Reading FIFO data\n");
+    //printf("Reading FIFO data\n");
     data = read_fifo_reg(chip);
   }
   return data;
@@ -198,7 +198,7 @@ static void write_reg(chip_state_t *chip, uint8_t reg, uint8_t value)
     printf("Setting accel ODR to %d\n", value);
     chip->regs[reg] = value;
     uint64_t tv = 1E12/odr_to_millihz(value&0xf);
-    printf("Setting timer to %lld\n", tv);
+    //printf("Setting timer to %lld\n", tv);
     timer_stop(chip->sample_timer);
     timer_start_ns(chip->sample_timer, tv, true);
     return;
@@ -226,7 +226,7 @@ static void chip_pin_change(void *user_data, pin_t pin, uint32_t value)
   {
     if (value == LOW)
     {
-      printf("SPI chip selected\n");
+      //printf("SPI chip selected\n");
       chip->spi_buffer[0] = ' '; // dummy byte
       chip->spi_data_from_host_idx = 0;
       // start transfer of next byte
@@ -234,7 +234,7 @@ static void chip_pin_change(void *user_data, pin_t pin, uint32_t value)
     }
     else
     {
-      printf("SPI chip deselected\n");
+      //printf("SPI chip deselected\n");
       spi_stop(chip->spi);
       if(chip->is_write){
         write_regs(chip);
@@ -255,7 +255,6 @@ void chip_spi_done(void *user_data, uint8_t *buffer, uint32_t count)
 
   if(count != 1){
     printf("Received unexpected %d bytes\n", count);
-    dump_buffer(buffer, count);
     return;
   }
 
@@ -289,7 +288,7 @@ void chip_spi_done(void *user_data, uint8_t *buffer, uint32_t count)
     // Continue with the next character
     spi_start(chip->spi, chip->spi_buffer, 1);
   } else {
-    printf("CS high\n");
+    //printf("CS high\n");
   }
 }
 

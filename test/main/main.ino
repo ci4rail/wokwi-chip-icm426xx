@@ -14,13 +14,13 @@
 
 typedef struct __attribute__((__packed__)){
   uint8_t header;
-  uint16_t accel_x;
-  uint16_t accel_y;
-  uint16_t accel_z;
-  uint16_t gyro_x;
-  uint16_t gyro_y;
-  uint16_t gyro_z;
-  uint8_t temp;
+  int16_t accel_x;
+  int16_t accel_y;
+  int16_t accel_z;
+  int16_t gyro_x;
+  int16_t gyro_y;
+  int16_t gyro_z;
+  int8_t temp;
   uint16_t timestamp;
 } packet3_t;
 

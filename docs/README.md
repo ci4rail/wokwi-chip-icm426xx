@@ -2,7 +2,15 @@
 
 Simulates a ICM426XX IMU chip in Wokwi.
 
+Accel and gyro data is generated as random noise, where the amplitude can be controlled via wokwi controls.
 
+Most configurations are ignored. We assume the following:
+
+* Only packet3 supported
+* ODR must be same for accel and gyro (gyro ODR ignored)
+* FIFO watermark in records only
+* FIFO count & data in little endian only
+* timestamp res 1us
 
 ## Pin names
 
