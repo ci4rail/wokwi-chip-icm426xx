@@ -24,7 +24,9 @@ typedef struct
   uint8_t reg_addr;
   uint8_t selected_bank;
   bool is_write;
-  uint16_t regs[0x80]; // bank 0 only
+  bool is_fifo_read;
+  uint8_t regs[5][0x80]; // Bank 0-4
+
   uint8_t fifo[2048];
   uint16_t fifo_read_idx;
   uint16_t fifo_write_idx;
@@ -56,29 +58,29 @@ static void update_fifo_count(chip_state_t *chip, int16_t count)
   //printf("FIFO count %d\n", chip->fifo_count);
 
   uint16_t records = chip->fifo_count/sizeof(packet3_t);
-  chip->regs[ICM426XX_FIFO_COUNTH] = records & 0xff;
-  chip->regs[ICM426XX_FIFO_COUNTH+1] = (records >> 8) & 0xff;
+  chip->regs[0][ICM426XX_FIFO_COUNTH] = records & 0xff;
+  chip->regs[0][ICM426XX_FIFO_COUNTH+1] = (records >> 8) & 0xff;
 }
 
 static void put_fifo_data(chip_state_t *chip, uint8_t *buffer, size_t size)
 {
   size_t update_size = size;
-  if(chip->fifo_count + size > sizeof(chip->fifo)){
+  if(chip->fifo_count + size >= sizeof(chip->fifo)){
     // discard oldest data
     chip->fifo_read_idx = (chip->fifo_read_idx + size) % sizeof(chip->fifo);
     update_size = 0;
 
     printf("FIFO overflow\n");
-    chip->regs[ICM426XX_INT_STATUS] |= 0x02; // FIFO full
+    chip->regs[0][ICM426XX_INT_STATUS] |= 0x02; // FIFO full
   }
   memcpy(chip->fifo + chip->fifo_write_idx, buffer, size);
   chip->fifo_write_idx = (chip->fifo_write_idx + size) % sizeof(chip->fifo);
   update_fifo_count(chip, update_size);
 
-  uint16_t fifo_wm = chip->regs[ICM426XX_ACCEL_CONFIG2] | (chip->regs[ICM426XX_ACCEL_CONFIG3]<<8);
+  uint16_t fifo_wm = chip->regs[0][ICM426XX_ACCEL_CONFIG2] | (chip->regs[0][ICM426XX_ACCEL_CONFIG3]<<8);
   if(chip->fifo_count/sizeof(packet3_t) >= fifo_wm){
     printf("FIFO watermark\n");
-    chip->regs[ICM426XX_INT_STATUS] |= 0x04; // FIFO watermark
+    chip->regs[0][ICM426XX_INT_STATUS] |= 0x04; // FIFO watermark
   }
 }
 
@@ -94,6 +96,16 @@ static uint8_t read_fifo_reg(chip_state_t *chip)
   return data;
 }
 
+// reset fifo read pointer to the previous packet3 boundary
+static void fix_fifo_read(chip_state_t *chip)
+{
+  uint16_t bias = chip->fifo_read_idx % sizeof(packet3_t);
+  if(bias){
+    chip->fifo_read_idx -= bias;
+    update_fifo_count(chip, bias);
+  }
+}
+
 // amplitude: 0.0 to 1.0
 static int16_t gen_random_int16(double amplitude)
 {
@@ -107,7 +119,7 @@ static int16_t gen_random_int16(double amplitude)
 static void on_sample_timer(void *user_data)
 {
   chip_state_t *chip = user_data;
-  if(!(chip->regs[ICM426XX_PWR_MGMT0] & 0x02)){
+  if(!(chip->regs[0][ICM426XX_PWR_MGMT0] & 0x02)){
     // chip not turned on
     return;
   }
@@ -132,8 +144,9 @@ static void on_sample_timer(void *user_data)
 void chip_init(void)
 {
   chip_state_t *chip = malloc(sizeof(chip_state_t));
-  memset(chip->regs, 0, sizeof(chip->regs));
+  memset(chip->regs[0], 0, sizeof(chip->regs[0]));
 
+  chip->regs[0][0x75] = 0x47; // ICM42688
   chip->accel_amplitude_attr = attr_init_float("accelamplitude", 1.0);
   chip->gyro_amplitude_attr = attr_init_float("gyroamplitude", 1.0);
 
@@ -166,45 +179,50 @@ void chip_init(void)
 static uint8_t read_reg(chip_state_t *chip, uint8_t reg)
 {
   uint8_t data = 0;
-  if(chip->selected_bank != 0){
-    return 0; // no other banks supported
+  if(reg == ICM426XX_REG_BANK_SEL){
+    return chip->selected_bank;
   }
-  if( reg != ICM426XX_FIFO_DATA){
-    data = chip->regs[reg];
+  data = chip->regs[chip->selected_bank][reg];
+  if(chip->selected_bank == 0){
     switch(reg){
     case ICM426XX_INT_STATUS:
       //printf("Reading INT_STATUS\n");
-      chip->regs[ICM426XX_INT_STATUS] = 0; // clear interrupt
+      chip->regs[0][ICM426XX_INT_STATUS] = 0; // clear interrupt
       break;
+    case ICM426XX_FIFO_DATA:
+      //printf("Reading FIFO data\n");
+      data = read_fifo_reg(chip);
     }
-  } else {
-    //printf("Reading FIFO data\n");
-    data = read_fifo_reg(chip);
   }
   return data;
 }
 
 static void write_reg(chip_state_t *chip, uint8_t reg, uint8_t value)
 {
-  if(chip->selected_bank != 0){
-    return; // no other banks supported
-  }
-  switch(reg){
-  case ICM426XX_REG_BANK_SEL:
+  if(reg == ICM426XX_REG_BANK_SEL){
     printf("Select bank %d\n", value);
-    chip->selected_bank = value;
-    return;
-  case ICM426XX_ACCEL_CONFIG0:
-    printf("Setting accel ODR to %d\n", value);
-    chip->regs[reg] = value;
-    uint64_t tv = 1E12/odr_to_millihz(value&0xf);
-    //printf("Setting timer to %lld\n", tv);
-    timer_stop(chip->sample_timer);
-    timer_start_ns(chip->sample_timer, tv, true);
+    if(value < 5){
+      chip->selected_bank = value;
+      chip->regs[0][ICM426XX_REG_BANK_SEL] = value;
+    } else {
+      printf("Invalid bank %d\n", value);
+    }
     return;
   }
-  printf("Writing reg %02x with value %02x\n", reg, value);
-  chip->regs[reg] = value;
+  if(chip->selected_bank == 0){
+    switch(reg){
+    case ICM426XX_ACCEL_CONFIG0:
+      printf("Setting accel ODR to %d\n", value);
+      chip->regs[0][reg] = value;
+      uint64_t tv = 1E12/odr_to_millihz(value&0xf);
+      //printf("Setting timer to %lld\n", tv);
+      timer_stop(chip->sample_timer);
+      timer_start_ns(chip->sample_timer, tv, true);
+      break;
+    }
+  }
+  printf("Writing reg bank %d %02x with value %02x\n", chip->selected_bank, reg, value);
+  chip->regs[chip->selected_bank][reg] = value;
 }
 
 
@@ -226,18 +244,28 @@ static void chip_pin_change(void *user_data, pin_t pin, uint32_t value)
   {
     if (value == LOW)
     {
-      //printf("SPI chip selected\n");
+      printf("%lld SPI chip selected\n", get_sim_nanos() );
       chip->spi_buffer[0] = ' '; // dummy byte
       chip->spi_data_from_host_idx = 0;
+      chip->is_write = false;
       // start transfer of next byte
       spi_start(chip->spi, chip->spi_buffer, 1);
     }
     else
     {
-      //printf("SPI chip deselected\n");
+      printf("%lld SPI chip deselected\n", get_sim_nanos() );
       spi_stop(chip->spi);
       if(chip->is_write){
         write_regs(chip);
+      }
+      if(chip->is_fifo_read){
+        // Workaround for issue with chip_spi_done
+        // Most of the time chip_spi_done is called one time too often, so 
+        // we have read already one byte too much from the fifo. 
+        // However, this is not always the case, depending on the CS timing.
+        // Because we can assume that the host reads always mutltiple of the
+        // packet3 size, we can fix the read pointer to the previous packet3 boundary.
+        fix_fifo_read(chip);
       }
     }
   }
@@ -249,6 +277,7 @@ void chip_spi_done(void *user_data, uint8_t *buffer, uint32_t count)
   chip_state_t *chip = (chip_state_t *)user_data;
   if (!count)
   {
+    //printf("No data received\n");
     // This means that we got here from spi_stop, and no data was received
     return;
   }
@@ -259,7 +288,7 @@ void chip_spi_done(void *user_data, uint8_t *buffer, uint32_t count)
   }
 
   uint8_t data = buffer[0];
-  //printf("Received byte %02x idx %d\n", data, chip->spi_data_from_host_idx);
+  printf("Received byte %02x idx %d\n", data, chip->spi_data_from_host_idx);
   
   if(chip->spi_data_from_host_idx < sizeof(chip->spi_data_from_host)){
     chip->spi_data_from_host[chip->spi_data_from_host_idx] = data;
@@ -267,28 +296,36 @@ void chip_spi_done(void *user_data, uint8_t *buffer, uint32_t count)
   if(chip->spi_data_from_host_idx==0){
     chip->reg_addr = data & 0x7f;
     chip->is_write = (data & 0x80) == 0;
+    chip->is_fifo_read = chip->reg_addr == ICM426XX_FIFO_DATA;
   } else {
-    if( chip->reg_addr != ICM426XX_FIFO_DATA){
-      if(chip->spi_data_from_host_idx>1){
+    if( !chip->is_fifo_read){
+      if(chip->is_write){
+        if(chip->spi_data_from_host_idx>1){
+          chip->reg_addr++;
+        }
+      } else {
         chip->reg_addr++;
+        if(chip->reg_addr == ICM426XX_FIFO_DATA || chip->reg_addr == ICM426XX_INT_STATUS){
+          chip->reg_addr--; // avoid incrementing to registers where read has side effects
+        }
       }
     }
-  }
-  //printf("Reg addr %02x write=%d\n", chip->reg_addr, chip->is_write);
-  if(!chip->is_write){
-    buffer[0] = read_reg(chip, chip->reg_addr);
-    //printf("Sending byte %02x\n", buffer[0]);
-  } else {
-    buffer[0] = 0;
   }
 
   chip->spi_data_from_host_idx++;
   if (pin_read(chip->cs_pin) == LOW)
   {
+    printf("%lld: Reg addr %02x write=%d\n", get_sim_nanos(), chip->reg_addr, chip->is_write);
+    if(!chip->is_write){
+      chip->spi_buffer[0] = read_reg(chip, chip->reg_addr);
+    } else {
+      chip->spi_buffer[0] = 0;
+    }
     // Continue with the next character
+    printf("Sending byte %02x\n", chip->spi_buffer[0]);
     spi_start(chip->spi, chip->spi_buffer, 1);
   } else {
-    //printf("CS high\n");
+    printf("CS high\n");
   }
 }
 

@@ -44,6 +44,7 @@ void spi_transfer(uint8_t *buffer, size_t len)
   SPI.transfer(buffer, len);
   SPI.end();
   digitalWrite(CS, HIGH);
+  //dumpBuffer(buffer, len);
 }
 
 
@@ -64,7 +65,7 @@ uint8_t read_reg(uint8_t reg)
 }
 
 
-uint8_t read_reg16(uint8_t reg)
+uint16_t read_reg16(uint8_t reg)
 {
   uint8_t buffer[3] = {0};
   buffer[0] = 0x80 | reg;
@@ -92,6 +93,16 @@ void setup()
   uint8_t v;
   v = read_reg(ICM426XX_ACCEL_CONFIG0);
   Serial.print("Accel config: ");
+  Serial.println(v, HEX);
+
+  write_reg(ICM426XX_REG_BANK_SEL, 0x04); // select bank 4
+  write_reg(0x60, 0xab); 
+  v = read_reg(0x60);
+  Serial.print("Bank 4 reg 0x44: ");
+  Serial.println(v, HEX);
+  write_reg(ICM426XX_REG_BANK_SEL, 0x00); // select bank 0
+  v = read_reg(ICM426XX_ACCEL_CONFIG2);
+  Serial.print("Accel config2: ");
   Serial.println(v, HEX);
 
   write_reg(ICM426XX_PWR_MGMT0, 0xf); // enable
